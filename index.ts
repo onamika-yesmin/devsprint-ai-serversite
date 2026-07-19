@@ -143,8 +143,15 @@ function googleCallbackUrl(req: Request) {
   return env.google.callbackUrl || `${protocol}://${req.get('host')}/api/auth/google/callback`;
 }
 
-app.get('/', (_req, res) => res.json({ message: 'DevSprint AI API is running', database: databaseConnected ? 'connected' : 'demo mode' }));
-app.get('/api/health', (_req, res) => res.json({ ok: true, database: databaseConnected ? 'connected' : 'demo' }));
+const databaseStatus = () => ({
+  database: databaseConnected ? 'connected' : 'demo',
+  mongoConfigured: env.mongoConfigured,
+  mongoEnvName: env.mongoEnvName,
+  reason: databaseConnected ? undefined : env.mongoConfigured ? 'MongoDB connection failed.' : 'Set MONGODB_URI or MONGO_URI on the deployed backend project.',
+});
+
+app.get('/', (_req, res) => res.json({ message: 'DevSprint AI API is running', ...databaseStatus() }));
+app.get('/api/health', (_req, res) => res.json({ ok: true, ...databaseStatus() }));
 
 app.post('/api/auth/register', async (req: Request, res: Response) => {
   const { name, email, password, avatarUrl } = req.body as { name?: string; email?: string; password?: string; avatarUrl?: string };

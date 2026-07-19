@@ -1,6 +1,6 @@
 import 'dotenv/config';
 
-const requiredInProduction = ['MONGODB_URI', 'JWT_SECRET'];
+const requiredInProduction = ['JWT_SECRET'];
 const mongoUri = process.env.MONGODB_URI ?? process.env.MONGO_URI;
 const normalizedMongoUri = mongoUri?.trim();
 const isDemoMongo = normalizedMongoUri ? ['demo', 'disabled', 'false', 'none'].includes(normalizedMongoUri.toLowerCase()) : true;
@@ -18,6 +18,8 @@ export const env = {
   clientUrl: process.env.CLIENT_URL ?? 'http://localhost:3000',
   // MONGO_URI is supported for compatibility with existing Vercel projects.
   mongoUri: isDemoMongo ? undefined : normalizedMongoUri,
+  mongoConfigured: Boolean(normalizedMongoUri) && !isDemoMongo,
+  mongoEnvName: process.env.MONGODB_URI ? 'MONGODB_URI' : process.env.MONGO_URI ? 'MONGO_URI' : undefined,
   jwtSecret: process.env.JWT_SECRET ?? 'development-only-secret-change-me',
   jwtExpiresIn: process.env.JWT_EXPIRES_IN ?? '7d',
   cloudinary: { cloudName: process.env.CLOUDINARY_CLOUD_NAME, apiKey: process.env.CLOUDINARY_API_KEY, apiSecret: process.env.CLOUDINARY_API_SECRET },
