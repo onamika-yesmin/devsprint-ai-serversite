@@ -31,7 +31,7 @@ const allowedOrigins = Array.from(new Set([
   'http://127.0.0.1:3000',
 ]));
 app.use(cors({ origin: allowedOrigins, credentials: true }));
-app.use(express.json({ limit: '8mb' }));
+app.use(express.json({ limit: '30mb' }));
 // Vercel functions are cold-started. Wait for the initial database connection
 // before handling a request, but keep the API usable in intentional demo mode.
 app.use(async (_req, _res, next) => { await ensureDatabase(); next(); });
