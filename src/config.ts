@@ -1,6 +1,10 @@
 import 'dotenv/config';
 
 const requiredInProduction = ['MONGODB_URI', 'JWT_SECRET'];
+const mongoUri = process.env.MONGODB_URI ?? process.env.MONGO_URI;
+const normalizedMongoUri = mongoUri?.trim();
+const isDemoMongo = normalizedMongoUri ? ['demo', 'disabled', 'false', 'none'].includes(normalizedMongoUri.toLowerCase()) : true;
+
 if (process.env.NODE_ENV === 'production') {
   const missing = requiredInProduction.filter((key) => !process.env[key]);
   // Do not crash the entire Vercel function at import time. The health route
@@ -13,7 +17,7 @@ export const env = {
   port: Number(process.env.PORT ?? 5000),
   clientUrl: process.env.CLIENT_URL ?? 'http://localhost:3000',
   // MONGO_URI is supported for compatibility with existing Vercel projects.
-  mongoUri: process.env.MONGODB_URI ?? process.env.MONGO_URI,
+  mongoUri: isDemoMongo ? undefined : normalizedMongoUri,
   jwtSecret: process.env.JWT_SECRET ?? 'development-only-secret-change-me',
   jwtExpiresIn: process.env.JWT_EXPIRES_IN ?? '7d',
   cloudinary: { cloudName: process.env.CLOUDINARY_CLOUD_NAME, apiKey: process.env.CLOUDINARY_API_KEY, apiSecret: process.env.CLOUDINARY_API_SECRET },
