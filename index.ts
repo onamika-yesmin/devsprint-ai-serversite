@@ -172,6 +172,28 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
   res.json({ token: signToken({ userId: String(user._id), email: user.email }), user: { id: String(user._id), name: user.name, email: user.email, avatarUrl: user.avatarUrl } });
 });
 app.post('/api/auth/demo', (_req, res) => res.json({ token: signToken({ userId: demoUser.id, email: demoUser.email }), user: demoUser }));
+app.patch('/api/users/me', requireAuth, async (req, res) => {
+  const { name, email, avatarUrl } = req.body as { name?: string; email?: string; avatarUrl?: string };
+  if (!name || !email) return res.status(400).json({ message: 'Name and email are required.' });
+  const normalizedEmail = email.toLowerCase();
+  const current = auth(req);
+  if (!databaseConnected) {
+    if (current.userId === demoUser.id) return res.json({ user: { ...demoUser, name, email: normalizedEmail, avatarUrl } });
+    const user = memoryUsers.find((item) => item.id === current.userId);
+    if (!user) return res.status(404).json({ message: 'User not found.' });
+    const emailOwner = memoryUsers.find((item) => item.email === normalizedEmail && item.id !== current.userId);
+    if (emailOwner) return res.status(409).json({ message: 'An account already exists for this email.' });
+    user.name = name;
+    user.email = normalizedEmail;
+    user.avatarUrl = avatarUrl;
+    return res.json({ user: { id: user.id, name: user.name, email: user.email, avatarUrl: user.avatarUrl } });
+  }
+  const emailOwner = await User.findOne({ email: normalizedEmail, _id: { $ne: current.userId } });
+  if (emailOwner) return res.status(409).json({ message: 'An account already exists for this email.' });
+  const user = await User.findByIdAndUpdate(current.userId, { name, email: normalizedEmail, avatarUrl }, { new: true, runValidators: true });
+  if (!user) return res.status(404).json({ message: 'User not found.' });
+  res.json({ user: { id: String(user._id), name: user.name, email: user.email, avatarUrl: user.avatarUrl } });
+});
 app.get('/api/auth/google', (req, res) => {
   if (!env.google.clientId || !env.google.clientSecret) return res.status(503).json({ message: 'Google OAuth is not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.' });
   const state = jwt.sign({ purpose: 'google-oauth' }, env.jwtSecret, { expiresIn: '10m' });
@@ -214,6 +236,7 @@ app.get('/api/auth/google/callback', async (req, res) => {
     target.searchParams.set('token', signToken({ userId: user.id, email: user.email }));
     target.searchParams.set('name', user.name);
     target.searchParams.set('email', user.email);
+    if (user.avatarUrl) target.searchParams.set('avatarUrl', user.avatarUrl);
     res.redirect(target.toString());
   } catch (error) {
     console.error('Google OAuth callback failed', error);
