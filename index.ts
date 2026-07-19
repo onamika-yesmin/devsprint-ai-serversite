@@ -1,54 +1,69 @@
 import express, { Request, Response } from 'express';
+import cors from 'cors';
+import bcrypt from 'bcryptjs';
+import { v2 as cloudinary } from 'cloudinary';
+import { env } from './src/config';
+import { connectDatabase } from './src/database';
+import { Project, User } from './src/models';
+import { requireAuth, signToken, TokenPayload } from './src/auth';
+import { createProjectPlan } from './src/ai';
 
 const app = express();
-const initialPort = Number(process.env.PORT) || 5000;
-app.use(express.json());
+let databaseConnected = false;
+app.use(cors({ origin: env.clientUrl.split(',').map((url) => url.trim()), credentials: true }));
+app.use(express.json({ limit: '2mb' }));
+if (env.cloudinary.cloudName && env.cloudinary.apiKey && env.cloudinary.apiSecret) cloudinary.config({ cloud_name: env.cloudinary.cloudName, api_key: env.cloudinary.apiKey, api_secret: env.cloudinary.apiSecret });
 
-type Project = { id: string; title: string; description: string; priority: 'High' | 'Medium' | 'Low'; techStack: string; createdAt: string };
-const projects: Project[] = [
-  { id: 'atlas', title: 'Atlas Finance', description: 'A calm personal-finance workspace for modern teams.', priority: 'High', techStack: 'Next.js', createdAt: '2026-07-12' },
-  { id: 'pulse', title: 'Pulse Health', description: 'A connected care experience from appointment to follow-up.', priority: 'Medium', techStack: 'React', createdAt: '2026-07-11' },
-];
+type DemoProject = { id: string; owner: string; title: string; shortDescription: string; fullDescription: string; priority: 'High' | 'Medium' | 'Low'; techStack: string[]; createdAt: string; imageUrl?: string; aiBlueprint: string; tasks: { title: string; priority: 'High' | 'Medium' | 'Low'; status: 'todo' | 'in-progress' | 'done'; sprint: number }[] };
+const demoProjects: DemoProject[] = [];
+const demoUser = { id: 'demo-user', name: 'Demo User', email: 'demo@devsprint.ai' };
+const auth = (req: Request) => (req as Request & { auth: TokenPayload }).auth;
+const serialize = (project: any) => ({ id: String(project._id ?? project.id), title: project.title, shortDescription: project.shortDescription, fullDescription: project.fullDescription, priority: project.priority, techStack: project.techStack, imageUrl: project.imageUrl, aiBlueprint: project.aiBlueprint, tasks: project.tasks, createdAt: project.createdAt, owner: String(project.owner) });
 
-app.get('/', (_req: Request, res: Response) => {
-  res.json({ message: 'Backend is running successfully!' });
+app.get('/', (_req, res) => res.json({ message: 'DevSprint AI API is running', database: databaseConnected ? 'connected' : 'demo mode' }));
+app.get('/api/health', (_req, res) => res.json({ ok: true, database: databaseConnected ? 'connected' : 'demo' }));
+
+app.post('/api/auth/register', async (req: Request, res: Response) => {
+  const { name, email, password, avatarUrl } = req.body as { name?: string; email?: string; password?: string; avatarUrl?: string };
+  if (!name || !email || !password || password.length < 8) return res.status(400).json({ message: 'Name, email, and a password of at least 8 characters are required.' });
+  if (!databaseConnected) return res.status(503).json({ message: 'Registration needs MONGODB_URI. Use the demo account while local database configuration is incomplete.' });
+  if (await User.exists({ email: email.toLowerCase() })) return res.status(409).json({ message: 'An account already exists for this email.' });
+  const user = await User.create({ name, email: email.toLowerCase(), passwordHash: await bcrypt.hash(password, 12), avatarUrl });
+  res.status(201).json({ token: signToken({ userId: String(user._id), email: user.email }), user: { id: String(user._id), name: user.name, email: user.email, avatarUrl: user.avatarUrl } });
 });
-
-app.get('/api/projects', (req: Request, res: Response) => {
-  const search = String(req.query.search ?? '').toLowerCase();
-  const priority = String(req.query.priority ?? '');
-  const techStack = String(req.query.techStack ?? '');
-  const data = projects.filter((item) => (!search || `${item.title} ${item.description}`.toLowerCase().includes(search)) && (!priority || item.priority === priority) && (!techStack || item.techStack === techStack));
-  res.json({ data, total: data.length });
+app.post('/api/auth/login', async (req: Request, res: Response) => {
+  const { email, password } = req.body as { email?: string; password?: string };
+  if (email === demoUser.email && password === 'demo12345') return res.json({ token: signToken({ userId: demoUser.id, email: demoUser.email }), user: demoUser });
+  if (!databaseConnected) return res.status(401).json({ message: 'Use demo@devsprint.ai with password demo12345, or configure MongoDB.' });
+  const user = await User.findOne({ email: email?.toLowerCase() });
+  if (!user || !user.passwordHash || !(await bcrypt.compare(password ?? '', user.passwordHash))) return res.status(401).json({ message: 'Incorrect email or password.' });
+  res.json({ token: signToken({ userId: String(user._id), email: user.email }), user: { id: String(user._id), name: user.name, email: user.email, avatarUrl: user.avatarUrl } });
 });
+app.post('/api/auth/demo', (_req, res) => res.json({ token: signToken({ userId: demoUser.id, email: demoUser.email }), user: demoUser }));
+app.get('/api/auth/google', (_req, res) => res.status(501).json({ message: 'Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET, then add your Google OAuth provider callback.' }));
 
-app.get('/api/projects/:id', (req: Request, res: Response) => {
-  const project = projects.find((item) => item.id === req.params.id);
-  if (!project) return res.status(404).json({ message: 'Project not found' });
-  res.json({ data: project });
+app.get('/api/projects', async (req, res) => {
+  const { search = '', priority = '', techStack = '', page = '1', limit = '12' } = req.query as Record<string, string>;
+  const filter: Record<string, unknown> = {};
+  if (search) filter.$or = [{ title: new RegExp(search, 'i') }, { shortDescription: new RegExp(search, 'i') }];
+  if (priority) filter.priority = priority;
+  if (techStack) filter.techStack = techStack;
+  if (!databaseConnected) { const data = demoProjects.filter((p) => (!search || `${p.title} ${p.shortDescription}`.toLowerCase().includes(search.toLowerCase())) && (!priority || p.priority === priority) && (!techStack || p.techStack.includes(techStack))); return res.json({ data, total: data.length, page: 1 }); }
+  const currentPage = Math.max(Number(page), 1); const perPage = Math.min(Math.max(Number(limit), 1), 50);
+  const [data, total] = await Promise.all([Project.find(filter).sort({ createdAt: -1 }).skip((currentPage - 1) * perPage).limit(perPage), Project.countDocuments(filter)]);
+  res.json({ data: data.map(serialize), total, page: currentPage });
 });
-
-app.post('/api/projects', (req: Request, res: Response) => {
-  const { title, description, priority = 'Medium', techStack = 'TypeScript' } = req.body as Partial<Project>;
-  if (!title || !description) return res.status(400).json({ message: 'title and description are required' });
-  const project: Project = { id: crypto.randomUUID(), title, description, priority: priority as Project['priority'], techStack, createdAt: new Date().toISOString() };
-  projects.unshift(project);
-  res.status(201).json({ data: project });
+app.get('/api/projects/:id', async (req, res) => { const project = databaseConnected ? await Project.findById(req.params.id) : demoProjects.find((item) => item.id === req.params.id); if (!project) return res.status(404).json({ message: 'Project not found.' }); res.json({ data: serialize(project) }); });
+app.post('/api/projects', requireAuth, async (req, res) => {
+  const { title, shortDescription, fullDescription = '', deadline, priority = 'Medium', techStack = [], imageUrl, prdText = '' } = req.body;
+  if (!title || !shortDescription) return res.status(400).json({ message: 'Title and short description are required.' });
+  const plan = await createProjectPlan(title, prdText || fullDescription);
+  const record = { owner: auth(req).userId, title, shortDescription, fullDescription, deadline: deadline || undefined, priority, techStack: Array.isArray(techStack) ? techStack : [], imageUrl, prdText, aiBlueprint: plan.blueprint, tasks: plan.tasks };
+  if (!databaseConnected) { const project: DemoProject = { id: crypto.randomUUID(), createdAt: new Date().toISOString(), ...record }; demoProjects.unshift(project); return res.status(201).json({ data: project }); }
+  const project = await Project.create(record); res.status(201).json({ data: serialize(project) });
 });
+app.delete('/api/projects/:id', requireAuth, async (req, res) => { if (!databaseConnected) { const index = demoProjects.findIndex((project) => project.id === req.params.id && project.owner === auth(req).userId); if (index < 0) return res.status(404).json({ message: 'Project not found.' }); demoProjects.splice(index, 1); return res.status(204).send(); } const result = await Project.deleteOne({ _id: req.params.id, owner: auth(req).userId }); if (!result.deletedCount) return res.status(404).json({ message: 'Project not found.' }); res.status(204).send(); });
+app.post('/api/uploads/signature', requireAuth, (_req, res) => { if (!env.cloudinary.apiSecret || !env.cloudinary.apiKey || !env.cloudinary.cloudName) return res.status(503).json({ message: 'Cloudinary server credentials are not configured.' }); const timestamp = Math.round(Date.now() / 1000); const signature = cloudinary.utils.api_sign_request({ timestamp }, env.cloudinary.apiSecret); res.json({ signature, timestamp, apiKey: env.cloudinary.apiKey, cloudName: env.cloudinary.cloudName }); });
 
-const startServer = (port: number) => {
-  const server = app.listen(port, () => {
-    console.log(`Server is running on http://localhost:${port}`);
-  });
-
-  server.on('error', (error: NodeJS.ErrnoException) => {
-    if (error.code === 'EADDRINUSE') {
-      console.log(`Port ${port} is busy. Trying ${port + 1}...`);
-      startServer(port + 1);
-    } else {
-      throw error;
-    }
-  });
-};
-
-startServer(initialPort);
+async function start() { try { databaseConnected = await connectDatabase(); } catch (error) { console.error('MongoDB connection failed; starting in demo mode.', error); } app.listen(env.port, () => console.log(`Server running on http://localhost:${env.port}`)); }
+start();
