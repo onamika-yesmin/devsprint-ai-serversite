@@ -3,7 +3,9 @@ import 'dotenv/config';
 const requiredInProduction = ['MONGODB_URI', 'JWT_SECRET'];
 if (process.env.NODE_ENV === 'production') {
   const missing = requiredInProduction.filter((key) => !process.env[key]);
-  if (missing.length) throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
+  // Do not crash the entire Vercel function at import time. The health route
+  // stays available and the database layer reports demo mode until values are set.
+  if (missing.length) console.warn(`Missing production environment variables: ${missing.join(', ')}`);
 }
 
 export const env = {

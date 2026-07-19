@@ -10,8 +10,23 @@ import { createProjectPlan } from './src/ai';
 
 const app = express();
 let databaseConnected = false;
+let databaseReady: Promise<boolean> | undefined;
+function ensureDatabase() {
+  if (!databaseReady) databaseReady = connectDatabase().then((connected) => {
+    databaseConnected = connected;
+    return connected;
+  }).catch((error) => {
+    console.error('MongoDB connection failed; using demo mode.', error);
+    databaseConnected = false;
+    return false;
+  });
+  return databaseReady;
+}
 app.use(cors({ origin: env.clientUrl.split(',').map((url) => url.trim()), credentials: true }));
 app.use(express.json({ limit: '2mb' }));
+// Vercel functions are cold-started. Wait for the initial database connection
+// before handling a request, but keep the API usable in intentional demo mode.
+app.use(async (_req, _res, next) => { await ensureDatabase(); next(); });
 if (env.cloudinary.cloudName && env.cloudinary.apiKey && env.cloudinary.apiSecret) cloudinary.config({ cloud_name: env.cloudinary.cloudName, api_key: env.cloudinary.apiKey, api_secret: env.cloudinary.apiSecret });
 
 type DemoProject = { id: string; owner: string; title: string; shortDescription: string; fullDescription: string; priority: 'High' | 'Medium' | 'Low'; techStack: string[]; createdAt: string; imageUrl?: string; aiBlueprint: string; tasks: { title: string; priority: 'High' | 'Medium' | 'Low'; status: 'todo' | 'in-progress' | 'done'; sprint: number }[] };
@@ -65,5 +80,9 @@ app.post('/api/projects', requireAuth, async (req, res) => {
 app.delete('/api/projects/:id', requireAuth, async (req, res) => { if (!databaseConnected) { const index = demoProjects.findIndex((project) => project.id === req.params.id && project.owner === auth(req).userId); if (index < 0) return res.status(404).json({ message: 'Project not found.' }); demoProjects.splice(index, 1); return res.status(204).send(); } const result = await Project.deleteOne({ _id: req.params.id, owner: auth(req).userId }); if (!result.deletedCount) return res.status(404).json({ message: 'Project not found.' }); res.status(204).send(); });
 app.post('/api/uploads/signature', requireAuth, (_req, res) => { if (!env.cloudinary.apiSecret || !env.cloudinary.apiKey || !env.cloudinary.cloudName) return res.status(503).json({ message: 'Cloudinary server credentials are not configured.' }); const timestamp = Math.round(Date.now() / 1000); const signature = cloudinary.utils.api_sign_request({ timestamp }, env.cloudinary.apiSecret); res.json({ signature, timestamp, apiKey: env.cloudinary.apiKey, cloudName: env.cloudinary.cloudName }); });
 
-async function start() { try { databaseConnected = await connectDatabase(); } catch (error) { console.error('MongoDB connection failed; starting in demo mode.', error); } app.listen(env.port, () => console.log(`Server running on http://localhost:${env.port}`)); }
-start();
+if (require.main === module) {
+  ensureDatabase().finally(() => app.listen(env.port, () => console.log(`Server running on http://localhost:${env.port}`)));
+}
+
+// Required by Vercel: it invokes this Express app as a serverless function.
+export default app;
