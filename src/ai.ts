@@ -7,6 +7,8 @@ type RecommendationProject = {
   id: string;
   title: string;
   shortDescription: string;
+  fullDescription?: string;
+  deadline?: string;
   priority: 'High' | 'Medium' | 'Low';
   techStack: string[];
   tasks?: { title: string; status: string; priority: string; sprint: number }[];
@@ -105,33 +107,67 @@ Return JSON with this exact shape:
 }
 
 export async function generateContentDraft(input: { kind: string; audience: string; tone: string; length: string; context: string }) {
-  const fallback = `# ${input.kind || 'Project'} draft\n\nFor ${input.audience || 'the product team'}, this ${input.tone || 'clear'} draft turns the provided context into a practical launch message.\n\n## Key message\n${input.context || 'Clarify the customer problem, describe the outcome, and explain the next action.'}\n\n## Call to action\nReview the scope, confirm the owner, and start the next sprint with a measurable goal.`;
+  const context = input.context?.trim() || 'Clarify the customer problem, describe the outcome, and explain the next action.';
+  const wordTarget = input.length === 'short' ? '120-180 words' : input.length === 'long' ? '450-650 words' : '240-360 words';
+  const fallback = `# ${input.kind || 'Project'} draft
+
+Audience: ${input.audience || 'product stakeholders'}
+Tone: ${input.tone || 'clear and practical'}
+Target length: ${wordTarget}
+
+## Core message
+${context}
+
+## Why it matters
+This work gives the team a clearer path from project intent to sprint execution. It connects priority, delivery risk, and the next decision stakeholders need to make.
+
+## Recommended next move
+Confirm the owner, reduce the scope to the highest-impact workflow, and turn the next sprint into three measurable outcomes.`;
   const result = await callLlm(
     'You are a senior product content strategist. Produce useful, specific, non-placeholder content.',
-    `Generate a ${input.length || 'medium'} ${input.kind || 'project brief'}.
+    `Generate a ${input.length || 'medium'} ${input.kind || 'project brief'} of about ${wordTarget}.
 Audience: ${input.audience || 'product builders'}
 Tone: ${input.tone || 'clear and confident'}
+Use concrete details from the context, preserve any task or priority signals, and end with a clear next action.
 Context:
-${input.context || 'A product team needs a crisp launch-ready draft.'}`
+${context}`
   );
   return { draft: result.text || fallback, provider: result.provider };
 }
 
 export async function recommendProjects(projects: RecommendationProject[], goals: string) {
-  const ranked = [...projects].sort((a, b) => {
-    const score = (project: RecommendationProject) =>
-      (project.priority === 'High' ? 3 : project.priority === 'Medium' ? 2 : 1) +
-      (project.tasks?.filter((task) => task.status !== 'done').length ?? 0) * 0.2 +
-      (goals && `${project.title} ${project.shortDescription} ${project.techStack.join(' ')}`.toLowerCase().includes(goals.toLowerCase()) ? 2 : 0);
-    return score(b) - score(a);
-  }).slice(0, 4);
+  const goalTerms = goals.toLowerCase().split(/[^a-z0-9]+/).filter((term) => term.length > 2 && !['the', 'and', 'for', 'with', 'this', 'that', 'from', 'into'].includes(term));
+  const scoreProject = (project: RecommendationProject) => {
+    const tasks = project.tasks ?? [];
+    const searchable = `${project.title} ${project.shortDescription} ${project.fullDescription ?? ''} ${project.priority} ${project.techStack.join(' ')} ${tasks.map((task) => `${task.title} ${task.priority} ${task.status}`).join(' ')}`.toLowerCase();
+    const matchScore = goalTerms.reduce((total, term) => total + (searchable.includes(term) ? 1 : 0), 0);
+    const openTasks = tasks.filter((task) => task.status !== 'done');
+    const highOpenTasks = openTasks.filter((task) => task.priority === 'High').length;
+    const dueSoon = project.deadline ? Math.max(0, 30 - Math.ceil((new Date(project.deadline).getTime() - Date.now()) / 86400000)) / 10 : 0;
+    return (
+      (project.priority === 'High' ? 6 : project.priority === 'Medium' ? 4 : 2) +
+      matchScore * 1.8 +
+      highOpenTasks * 1.4 +
+      openTasks.length * 0.35 +
+      dueSoon
+    );
+  };
+  const ranked = [...projects].sort((a, b) => scoreProject(b) - scoreProject(a)).slice(0, 4);
+  const lead = ranked[0];
+  const leadOpenTasks = lead?.tasks?.filter((task) => task.status !== 'done') ?? [];
+  const nextActions = lead
+    ? [
+      leadOpenTasks[0]?.title ? `Move "${leadOpenTasks[0].title}" into the next sprint checkpoint.` : `Define the first delivery checkpoint for ${lead.title}.`,
+      leadOpenTasks.find((task) => task.priority === 'High')?.title ? `Assign an owner for the high-priority task "${leadOpenTasks.find((task) => task.priority === 'High')?.title}".` : 'Assign owners to the highest-risk work before adding new scope.',
+      `Use ${lead.title} as the focus project and defer lower-priority work until its release path is stable.`,
+      'Review progress after the next three completed tasks and adjust the sprint plan.',
+    ]
+    : ['Create a project with a short brief.', 'Add priority and tech stack context.', 'Generate an AI blueprint.'];
   const fallback = {
     summary: ranked.length
-      ? `Focus on ${ranked[0].title} first because it has the strongest priority and the clearest near-term delivery path.`
+      ? `Focus on ${ranked[0].title} first. It has the strongest mix of priority, goal fit, and unfinished sprint work in this workspace.`
       : 'Add at least one project so DevSprint can build recommendations from your actual workspace.',
-    nextActions: ranked.length
-      ? ['Confirm the highest-risk task owner.', 'Limit the next sprint to the top three outcomes.', 'Review low-priority work after the release path is stable.']
-      : ['Create a project with a short brief.', 'Add priority and tech stack context.', 'Generate an AI blueprint.'],
+    nextActions,
     recommendedProjectIds: ranked.map((project) => project.id),
   };
 
@@ -151,10 +187,14 @@ Return JSON:
   if (result.provider === 'fallback') return { ...fallback, provider: result.provider };
   const parsed = extractJson(result.text) as Partial<typeof fallback> | undefined;
   if (!parsed?.summary || !Array.isArray(parsed.nextActions)) return { ...fallback, provider: 'fallback' as const };
+  const inputIds = new Set(projects.map((project) => project.id));
+  const recommendedProjectIds = Array.isArray(parsed.recommendedProjectIds)
+    ? parsed.recommendedProjectIds.map(String).filter((id) => inputIds.has(id)).slice(0, 4)
+    : fallback.recommendedProjectIds;
   return {
     summary: parsed.summary,
     nextActions: parsed.nextActions.slice(0, 5).map(String),
-    recommendedProjectIds: Array.isArray(parsed.recommendedProjectIds) ? parsed.recommendedProjectIds.map(String) : fallback.recommendedProjectIds,
+    recommendedProjectIds: recommendedProjectIds.length ? recommendedProjectIds : fallback.recommendedProjectIds,
     provider: result.provider,
   };
 }
